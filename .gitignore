@@ -1,0 +1,14 @@
+# CMake build output
+build/
+out/
+CMakeUserPresets.json
+CMakeSettings.json
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
