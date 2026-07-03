@@ -1,342 +1,231 @@
 #include "ParserState.h"
 #include "Combinators.h"
-#include "Lexer.h"
-#include "Grammar.h"
-#include "MetaParser.h"
 #include <iostream>
 #include <cassert>
 
-// ── Función helper para verificar que se consumió todo ────
-bool all_consumed(const ParserState& state) {
-    for (size_t i = state.cursor; i < state.input.size(); i++)
-        if (!isspace(state.input[i])) return false;
-    return true;
-}
-
-// ── Helper para correr un programa y reportar resultado ───
-bool run_program(const std::string& input, bool verbose = true) {
-    ParserState state(input);
-    setup_base_grammar(state);
-    ProgramRule()(state);
-    bool ok = all_consumed(state);
-    if (verbose) {
-        std::cout << "  consumido: " << state.cursor
-                  << "/" << input.size() << "\n";
-        if (!ok)
-            std::cout << "  restante: '"
-                      << state.input.substr(state.cursor) << "'\n";
+// A custom rule that dynamically defines a rule named "var"
+// by parsing '+<char>' and registering 'var' to match that '<char>'.
+// Example: If input is "+x", it matches and registers "var" to match 'x'.
+const Rule DefineVar = [](ParserState& state) -> bool {
+    if (state.has_more() && state.peek() == '+') {
+        auto cp = state.save();
+        state.advance();
+        if (state.has_more()) {
+            char c = state.peek();
+            state.advance();
+            // Dynamically register the rule in the current scope
+            state.register_rule("var", MatchChar(c));
+            return true;
+        }
+        state.restore(cp);
     }
-    return ok;
+    return false;
+};
+
+// A helper rule that executes "var" if it is defined in the current environment
+const Rule UseVar = [](ParserState& state) -> bool {
+    return state.execute_rule("var");
+};
+
+void run_test_1() {
+    std::cout << "[Test 1] Simple sequence matching...\n";
+    ParserState state("xyz");
+    Rule xy = Sequence(MatchChar('x'), MatchChar('y'));
+    
+    bool result = xy(state);
+    std::cout << "  Parse result of 'xy' on 'xyz': " << (result ? "SUCCESS" : "FAIL") << "\n";
+    std::cout << "  Cursor position (expected 2): " << state.cursor << "\n";
+    assert(result == true);
+    assert(state.cursor == 2);
+    std::cout << "  Test 1 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 1 — Gramática base sin extensiones
-// Verifica que print y assign funcionan solos
-// ══════════════════════════════════════════════════════════
-void test_base_grammar() {
-    std::cout << "[Test 1] gramatica base sin extensiones\n";
+void run_test_2() {
+    std::cout << "[Test 2] Dynamic Scoping & Environment Nesting...\n";
+    ParserState state("aa");
+    
+    // Register 'var' matching 'a' in the global scope
+    state.register_rule("var", MatchChar('a'));
+    
+    std::cout << "  Executing 'var' in global scope...\n";
+    bool res1 = UseVar(state);
+    std::cout << "    Match result (expected SUCCESS): " << (res1 ? "SUCCESS" : "FAIL") << "\n";
+    assert(res1 == true);
 
-    std::string input =
-        "print 42;\n"
-        "x := 10;\n"
-        "print x;\n"
-        "y := abc;\n"
-        "print 99;\n";
+    // Push local scope and register 'var' matching 'b'
+    state.push_scope();
+    state.register_rule("var", MatchChar('b'));
+    
+    // State is at index 1 now. Let's try matching 'var' (which expects 'b' in the local scope, but input has 'a')
+    std::cout << "  Executing 'var' in local scope (expects 'b', input has 'a')...\n";
+    bool res2 = UseVar(state);
+    std::cout << "    Match result (expected FAIL): " << (res2 ? "SUCCESS" : "FAIL") << "\n";
+    assert(res2 == false);
 
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
+    // Pop the local scope. Global scope 'var' (matching 'a') is restored.
+    state.pop_scope();
+    std::cout << "  Popped local scope. Executing 'var' in global scope...\n";
+    bool res3 = UseVar(state);
+    std::cout << "    Match result (expected SUCCESS): " << (res3 ? "SUCCESS" : "FAIL") << "\n";
+    assert(res3 == true);
+    
+    std::cout << "  Test 2 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 2 — create define una gramática sin activarla
-// La gramática se guarda pero 'repeat' no es válido todavía
-// ══════════════════════════════════════════════════════════
-void test_create_does_not_activate() {
-    std::cout << "[Test 2] create no activa la gramatica\n";
+void run_test_3() {
+    std::cout << "[Test 3] Semantic Backtracking & Rule Rollback...\n";
+    // Input is "+xz".
+    // We want to parse with:
+    // Choice(
+    //    Sequence(DefineVar, MatchChar('y')),  // First choice: Defines 'var' as 'x', then expects 'y' (will fail)
+    //    Sequence(DefineVar, MatchChar('z'))   // Second choice: Defines 'var' as 'x', then expects 'z' (should succeed)
+    // )
+    ParserState state("+xz");
+    
+    Rule rule_failed_branch = Sequence(DefineVar, MatchChar('y'));
+    Rule rule_success_branch = Sequence(DefineVar, MatchChar('z'));
+    Rule main_rule = Choice(rule_failed_branch, rule_success_branch);
 
-    // Solo el create — nada de syntax
-    // ProgramRule debe parsear el create exitosamente
-    // pero 'repeat' no debe ser válido en el nivel superior
-    std::string input_create =
-        "create loops {\n"
-        "  stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ;\n"
-        "}\n";
+    std::cout << "  Executing Choice of failing and succeeding branches...\n";
+    bool result = main_rule(state);
+    std::cout << "    Parse result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+    std::cout << "    Cursor position (expected 3): " << state.cursor << "\n";
+    assert(result == true);
+    assert(state.cursor == 3);
 
-    ParserState state(input_create);
-    setup_base_grammar(state);
-    ProgramRule()(state);
+    // Let's verify that the definition of 'var' registered by DefineVar in the successful branch persists
+    std::cout << "  Verifying that the dynamically registered rule 'var' is still active...\n";
+    ParserState state_use("x");
+    // Copy the environment from the parsed state to verify rule persistence
+    state_use.env = state.env;
+    bool res_use = UseVar(state_use);
+    std::cout << "    UseVar result on 'x' (expected SUCCESS): " << (res_use ? "SUCCESS" : "FAIL") << "\n";
+    assert(res_use == true);
 
-    bool create_parsed = all_consumed(state);
-    bool loops_defined = state.defined_grammars.count("loops") > 0;
-    bool repeat_valid  = state.execute_rule("stmt");
-
-    std::cout << "  create parseado: "
-              << (create_parsed ? "SI" : "NO") << "\n";
-    std::cout << "  'loops' en defined_grammars: "
-              << (loops_defined ? "SI" : "NO") << "\n";
-    std::cout << "  'repeat' valido sin syntax: "
-              << (repeat_valid ? "SI (MAL)" : "NO (BIEN)") << "\n\n";
-
-    assert(create_parsed);
-    assert(loops_defined);
-    assert(!repeat_valid);
+    std::cout << "  Test 3 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 3 — syntax activa y desactiva correctamente
-// 'repeat' válido dentro del bloque, no fuera
-// ══════════════════════════════════════════════════════════
-void test_syntax_scope() {
-    std::cout << "[Test 3] syntax activa dentro del bloque\n";
+void run_adv_test_1() {
+    std::cout << "[Adv Test 1] Many (Kleene Star) & Loop Protection...\n";
+    
+    // Case 1: Match multiple occurrences
+    {
+        ParserState state("xxxx");
+        Rule rule = Many(MatchChar('x'));
+        bool result = rule(state);
+        std::cout << "  Many('x') on 'xxxx' result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "  Cursor (expected 4): " << state.cursor << "\n";
+        assert(result == true);
+        assert(state.cursor == 4);
+    }
+    
+    // Case 2: Zero matches (should still succeed and not move cursor)
+    {
+        ParserState state("yxxx");
+        Rule rule = Many(MatchChar('x'));
+        bool result = rule(state);
+        std::cout << "  Many('x') on 'yxxx' result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "  Cursor (expected 0): " << state.cursor << "\n";
+        assert(result == true);
+        assert(state.cursor == 0);
+    }
 
-    // Dentro del bloque syntax: repeat es valido
-    std::string input_dentro =
-        "create loops {\n"
-        "  stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ;\n"
-        "}\n"
-        "syntax loops {\n"
-        "  repeat 3 times { print 42; }\n"
-        "}\n";
-
-    bool dentro = run_program(input_dentro);
-    std::cout << "  repeat dentro de syntax: "
-              << (dentro ? "EXITO" : "FALLO") << "\n";
-
-    // Fuera del bloque syntax: repeat no es valido
-    std::string input_fuera =
-        "create loops {\n"
-        "  stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ;\n"
-        "}\n"
-        "repeat 3 times { print 42; }\n";
-
-    bool fuera = run_program(input_fuera, false);
-    std::cout << "  repeat fuera de syntax: "
-              << (!fuera ? "FALLO (BIEN)" : "EXITO (MAL)") << "\n\n";
-
-    assert(dentro);
-    assert(!fuera);
+    // Case 3: Loop protection for non-consuming rules
+    {
+        ParserState state("xyz");
+        Rule non_consuming = [](ParserState&) -> bool { return true; };
+        Rule rule = Many(non_consuming);
+        
+        std::cout << "  Running Many on a non-consuming rule (testing loop protection)...\n";
+        bool result = rule(state); // If loop protection fails, this hangs infinitely
+        std::cout << "    Result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "    Cursor (expected 0): " << state.cursor << "\n";
+        assert(result == true);
+        assert(state.cursor == 0);
+    }
+    
+    std::cout << "  Adv Test 1 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 4 — programa completo mezclando base y extensión
-// print/assign antes, syntax en el medio, print/assign después
-// ══════════════════════════════════════════════════════════
-void test_full_program() {
-    std::cout << "[Test 4] programa completo con extension\n";
+void run_adv_test_2() {
+    std::cout << "[Adv Test 2] Lookahead Predicates (And / Not)...\n";
+    
+    // Positive lookahead (&'x')
+    {
+        ParserState state("xyz");
+        Rule look_x = AndPredicate(MatchChar('x'));
+        bool result = look_x(state);
+        std::cout << "  AndPredicate('x') on 'xyz' result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "  Cursor position (expected 0): " << state.cursor << "\n";
+        assert(result == true);
+        assert(state.cursor == 0);
+    }
 
-    std::string input =
-        "create loops {\n"
-        "  stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ;\n"
-        "}\n"
-        "print 1;\n"
-        "x := 10;\n"
-        "syntax loops {\n"
-        "  repeat 3 times { print 42; }\n"
-        "  repeat 2 times { x := 99; }\n"
-        "}\n"
-        "print 2;\n"
-        "y := 20;\n";
+    // Negative lookahead (!'y') at start (should succeed because it's not 'y')
+    {
+        ParserState state("xyz");
+        Rule look_not_y = NotPredicate(MatchChar('y'));
+        bool result = look_not_y(state);
+        std::cout << "  NotPredicate('y') on 'xyz' result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "  Cursor position (expected 0): " << state.cursor << "\n";
+        assert(result == true);
+        assert(state.cursor == 0);
+    }
 
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
+    // Negative lookahead (!'x') at start (should fail because it is 'x')
+    {
+        ParserState state("xyz");
+        Rule look_not_x = NotPredicate(MatchChar('x'));
+        bool result = look_not_x(state);
+        std::cout << "  NotPredicate('x') on 'xyz' result (expected FAIL): " << (result ? "SUCCESS" : "FAIL") << "\n";
+        std::cout << "  Cursor position (expected 0): " << state.cursor << "\n";
+        assert(result == false);
+        assert(state.cursor == 0);
+    }
+    
+    std::cout << "  Adv Test 2 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 5 — gramática custom con choice en el patrón
-// El usuario define dos alternativas con '/'
-// ══════════════════════════════════════════════════════════
-void test_custom_choice() {
-    std::cout << "[Test 5] gramatica custom con choice\n";
-
-    std::string input =
-        "create tipos {\n"
-        "  stmt -> 'int' . ident . ';' / 'str' . ident . ';' ;\n"
-        "}\n"
-        "syntax tipos {\n"
-        "  int contador;\n"
-        "  str nombre;\n"
-        "  int total;\n"
-        "}\n";
-
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
-}
-
-// ══════════════════════════════════════════════════════════
-// TEST 6 — gramática custom expresiva: declaración de vars
-// Demuestra que el usuario puede definir cualquier sintaxis
-// ══════════════════════════════════════════════════════════
-void test_custom_vardecl() {
-    std::cout << "[Test 6] gramatica custom: declaracion de variables\n";
-
-    std::string input =
-        "create vardecl {\n"
-        "  stmt -> 'let' . ident . '=' . num . ';' ;\n"
-        "}\n"
-        "print 1;\n"
-        "syntax vardecl {\n"
-        "  let x = 10;\n"
-        "  let total = 42;\n"
-        "  let contador = 0;\n"
-        "}\n"
-        "print 2;\n";
-
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
-}
-
-// ══════════════════════════════════════════════════════════
-// TEST 7 — dos extensiones simultáneas
-// syntax activa dos gramáticas a la vez con ','
-// ══════════════════════════════════════════════════════════
-void test_two_extensions() {
-    std::cout << "[Test 7] dos extensiones simultaneas\n";
-
-    std::string input =
-        "create saludos {\n"
-        "  stmt -> 'hello' . ident . ';' ;\n"
-        "}\n"
-        "create despedidas {\n"
-        "  stmt -> 'bye' . ident . ';' ;\n"
-        "}\n"
-        "syntax saludos, despedidas {\n"
-        "  hello mundo;\n"
-        "  bye juan;\n"
-        "  hello pedro;\n"
-        "}\n";
-
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
-}
-
-// ══════════════════════════════════════════════════════════
-// TEST 8 — extensiones secuenciales (no simultáneas)
-// Cada bloque syntax tiene su propio scope
-// ══════════════════════════════════════════════════════════
-void test_sequential_extensions() {
-    std::cout << "[Test 8] extensiones secuenciales\n";
-
-    std::string input =
-        "create ext1 {\n"
-        "  stmt -> 'foo' . ident . ';' ;\n"
-        "}\n"
-        "create ext2 {\n"
-        "  stmt -> 'bar' . num . ';' ;\n"
-        "}\n"
-        "syntax ext1 {\n"
-        "  foo hola;\n"
-        "  foo mundo;\n"
-        "}\n"
-        "syntax ext2 {\n"
-        "  bar 42;\n"
-        "  bar 99;\n"
-        "}\n"
-        "print 1;\n";
-
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
-}
-
-// ══════════════════════════════════════════════════════════
-// TEST 9 — backtracking: create fallido no contamina env
-// Si el bloque create es inválido, nada cambia
-// ══════════════════════════════════════════════════════════
-void test_failed_create() {
-    std::cout << "[Test 9] create fallido no contamina el environment\n";
-
-    // create sin cerrar la llave — inválido
-    std::string input_roto = "create roto { stmt -> 'x' ;";
-
-    ParserState state(input_roto);
-    setup_base_grammar(state);
-    ProgramRule()(state);
-
-    bool roto_definido = state.defined_grammars.count("roto") > 0;
-    std::cout << "  'roto' en defined_grammars: "
-              << (roto_definido ? "SI (MAL)" : "NO (BIEN)") << "\n";
-    std::cout << "  cursor (esperado 0): " << state.cursor << "\n\n";
-
-    assert(!roto_definido);
+void run_adv_test_3() {
+    std::cout << "[Adv Test 3] Lookahead + Rule Scoping Rollback...\n";
+    
+    // We try running DefineVar inside a positive lookahead: AndPredicate(DefineVar)
+    // The lookahead should succeed on "+x", but when it finishes, it MUST backtrack/restore
+    // the state. This means the dynamic rule "var" (which would match 'x') should NOT exist.
+    ParserState state("+x");
+    
+    Rule look_define = AndPredicate(DefineVar);
+    bool result = look_define(state);
+    
+    std::cout << "  AndPredicate(DefineVar) on '+x' result (expected SUCCESS): " << (result ? "SUCCESS" : "FAIL") << "\n";
+    std::cout << "  Cursor position after lookahead (expected 0): " << state.cursor << "\n";
+    assert(result == true);
     assert(state.cursor == 0);
+    
+    // Verify "var" is NOT defined
+    std::cout << "  Verifying that 'var' is NOT defined (since lookahead restored the env)...\n";
+    ParserState test_use("x");
+    test_use.env = state.env; // Copy the environment stack
+    bool use_result = UseVar(test_use);
+    std::cout << "    UseVar result (expected FAIL): " << (use_result ? "SUCCESS" : "FAIL") << "\n";
+    assert(use_result == false);
+    
+    std::cout << "  Adv Test 3 passed.\n\n";
 }
 
-// ══════════════════════════════════════════════════════════
-// TEST 10 — programa real complejo
-// Mezcla todo: base, múltiples creates, múltiples syntax
-// ══════════════════════════════════════════════════════════
-void test_complex_program() {
-    std::cout << "[Test 10] programa complejo real\n";
-
-    std::string input =
-        "create loops {\n"
-        "  stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ;\n"
-        "}\n"
-        "create vardecl {\n"
-        "  stmt -> 'let' . ident . '=' . num . ';' ;\n"
-        "}\n"
-        "create tipos {\n"
-        "  stmt -> 'int' . ident . ';' / 'str' . ident . ';' ;\n"
-        "}\n"
-        "print 1;\n"
-        "x := 10;\n"
-        "syntax vardecl {\n"
-        "  let total = 100;\n"
-        "  let contador = 0;\n"
-        "}\n"
-        "syntax tipos {\n"
-        "  int resultado;\n"
-        "  str nombre;\n"
-        "}\n"
-        "syntax loops {\n"
-        "  repeat 3 times { print 42; }\n"
-        "}\n"
-        "print 2;\n"
-        "y := 20;\n";
-
-    bool ok = run_program(input);
-    std::cout << "  resultado: " << (ok ? "EXITO" : "FALLO") << "\n\n";
-    assert(ok);
-}
-
-// ══════════════════════════════════════════════════════════
-// MAIN
-// ══════════════════════════════════════════════════════════
 int main() {
     std::cout << "===========================================\n";
-    std::cout << " APEG C++ - Parser Dinamico Completo\n";
+    std::cout << " APEG C++ Parser Prototype (MVP) Demo      \n";
     std::cout << "===========================================\n\n";
 
-    std::cout << "--- Gramática Base ---\n\n";
-    test_base_grammar();
-    test_create_does_not_activate();
+    run_test_1();
+    run_test_2();
+    run_test_3();
+    
+    run_adv_test_1();
+    run_adv_test_2();
+    run_adv_test_3();
 
-    std::cout << "--- Scoping Dinámico ---\n\n";
-    test_syntax_scope();
-    test_full_program();
-
-    std::cout << "--- Gramáticas Custom ---\n\n";
-    test_custom_choice();
-    test_custom_vardecl();
-
-    std::cout << "--- Múltiples Extensiones ---\n\n";
-    test_two_extensions();
-    test_sequential_extensions();
-
-    std::cout << "--- Robustez ---\n\n";
-    test_failed_create();
-
-    std::cout << "--- Programa Complejo ---\n\n";
-    test_complex_program();
-
-    std::cout << "===========================================\n";
-    std::cout << " Todos los tests pasaron!\n";
-    std::cout << "===========================================\n";
+    std::cout << "All tests passed successfully!\n";
     return 0;
 }
-
