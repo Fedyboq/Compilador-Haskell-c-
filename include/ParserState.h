@@ -14,6 +14,18 @@ struct ParserState;
 // modifying the ParserState on success, and returning true/false.
 using Rule = std::function<bool(ParserState&)>;
 
+struct UserRule {
+    std::string name;
+    Rule rule;
+};
+
+struct UserGrammar {
+    std::string name;
+    std::vector<UserRule> rules;
+};
+
+using GrammarMap = std::unordered_map<std::string, UserGrammar>;
+
 /**
  * @brief Represents the parsing state, including the input text cursor
  * and the layered/scoped rule environment characteristic of APEGs.
@@ -26,6 +38,8 @@ struct ParserState {
     // The top of the stack (back of the vector) is the most local scope.
     std::vector<std::unordered_map<std::string, Rule>> env;
 
+    GrammarMap defined_grammars;
+
     /**
      * @brief A Checkpoint captures the current cursor and a snapshot of
      * the scoped rule environment to support full rollback on backtracking.
@@ -33,6 +47,7 @@ struct ParserState {
     struct Checkpoint {
         size_t cursor;
         std::vector<std::unordered_map<std::string, Rule>> env;
+        GrammarMap defined_grammars;
     };
 
     /**
@@ -107,6 +122,14 @@ struct ParserState {
             }
         }
         return false; // Rule not found in any scope
+    }
+
+    bool has_rule(const std::string& name) const {
+        for (auto it = env.rbegin(); it != env.rend(); ++it) {
+            if (it->find(name) != it->end())
+                return true;
+        }
+        return false;
     }
 
     // --- Backtracking Checkpoints ---
