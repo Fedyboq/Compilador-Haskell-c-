@@ -7,6 +7,9 @@
 
 // Forward declaration: a Grammar is itself a first-class Value in APEG.
 struct Grammar;
+// A LanguageValue = a type-checked Grammar together with its typing context Γ
+// (see Apeg.h). It is also a first-class Value (kind Lang / tLang in the paper).
+struct LanguageValue;
 
 /**
  * @brief A generic, first-class Value in the APEG language.
@@ -27,7 +30,8 @@ struct Value {
         Sym,    ///< A symbol/identifier (semantically distinct from Str).
         List,   ///< An ordered list of Values.
         Node,   ///< An AST node: a labelled Value with children.
-        Gram    ///< A grammar, treated as a value (first-class grammar).
+        Gram,   ///< A grammar, treated as a value (first-class grammar).
+        Lang    ///< A language: a type-checked grammar + its typing context Γ.
     };
 
     Kind kind = Kind::Unit;
@@ -36,6 +40,7 @@ struct Value {
     std::string s;                       ///< Str / Sym payload, or Node label.
     std::vector<Value> items;            ///< List elements or Node children.
     std::shared_ptr<Grammar> gram;       ///< Gram payload (grammar as a value).
+    std::shared_ptr<LanguageValue> lang; ///< Lang payload (grammar + Γ as a value).
 
     // --- Factory helpers (clearer than aggregate initialisation) ---
 
@@ -52,6 +57,9 @@ struct Value {
     }
     static Value Gram(std::shared_ptr<Grammar> g) {
         Value x; x.kind = Kind::Gram; x.gram = std::move(g); return x;
+    }
+    static Value Lang(std::shared_ptr<LanguageValue> l) {
+        Value x; x.kind = Kind::Lang; x.lang = std::move(l); return x;
     }
 
     // --- Inspection ---
@@ -78,6 +86,7 @@ struct Value {
             case Kind::Str:  os << '"' << s << '"'; break;
             case Kind::Sym:  os << s; break;
             case Kind::Gram: os << "<grammar>"; break;
+            case Kind::Lang: os << "<language>"; break;
             case Kind::List: {
                 os << '[';
                 for (size_t k = 0; k < items.size(); ++k) {

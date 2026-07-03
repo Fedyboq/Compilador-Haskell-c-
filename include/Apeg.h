@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Value.h"
+#include "Type.h"
 
 #include <string_view>
 #include <functional>
@@ -9,6 +10,9 @@
 #include <vector>
 #include <string>
 #include <cctype>
+#include <stdexcept>
+#include <utility>
+#include <algorithm>
 
 /**
  * @file Apeg.h
@@ -52,6 +56,26 @@ using PExpr = std::function<PResult(State&)>;
 /// An attribute expression: a pure computation over the current state's attributes.
 using AExpr = std::function<Value(State&)>;
 
+/// Thrown when composing/extending grammars produces incompatible rule
+/// signatures (the L-ext type-consistency check of Figure 10 fails).
+struct TypeError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+/**
+ * @brief Declared signature of a non-terminal: its inherited attributes
+ *        (params) and synthesized attributes (returns), with optional types.
+ *        Models the paper's rule head  ⟨A ϑ::τⁿ  e::τᵐ⟩.  Signatures are
+ *        optional metadata: rules that don't need type checking leave them
+ *        empty. They are consulted by extendLanguage (L-ext).
+ */
+struct RuleSig {
+    std::vector<std::string> params;
+    std::vector<std::string> returns;
+    std::vector<Type>        paramTypes;
+    std::vector<Type>        returnTypes;
+};
+
 /**
  * @brief A Grammar is a map from non-terminal name to Rule -- and it is a
  *        first-class Value (see Value::Gram).  Updates are *immutable*: they
@@ -68,6 +92,10 @@ struct Grammar {
     /// opposed to the per-call local attributes kept in State::env.
     std::map<std::string, Value> attrs;
 
+    /// Optional per-rule signatures (params/returns + types) used by the
+    /// L-ext type-consistency check. Empty for rules that don't need types.
+    std::map<std::string, RuleSig> sigs;
+
     bool has(const std::string& name) const { return rules.count(name) > 0; }
 
     /// Return a copy of this grammar with `name` bound to `rule` (add or replace).
@@ -76,6 +104,21 @@ struct Grammar {
         g.rules[name] = std::move(rule);
         return g;
     }
+};
+
+/// Typing context Γ : ϑ → τ (a snapshot of which attribute variables a given
+/// language has typed). Flat map, packaged inside a LanguageValue.
+using Gamma = std::map<std::string, Type>;
+
+/**
+ * @brief A language value: "a type-checked grammar together with its typing
+ *        context" (tLang in the paper). Unlike a raw Grammar (pure syntax,
+ *        no guarantees), a LanguageValue has passed the L-ext consistency
+ *        check at least once. It is a first-class Value (Value::Lang).
+ */
+struct LanguageValue {
+    Grammar grammar;
+    Gamma   gamma;
 };
 
 /**
@@ -406,4 +449,90 @@ inline ParseOutcome runGrammar(std::shared_ptr<Grammar> g, const std::string& st
     out.ast  = r.val;
     out.ok   = r.ok && !s.has_more();
     return out;
+}
+
+// ===========================================================================
+//  Grammar composition (⊎) and typed language extension (⊳ / L-ext)
+//  Ported and adapted onto this engine from branch `si` (v1). Because our
+//  grammar updates are immutable, ⊎ is a pure function returning a NEW grammar
+//  -- there is no shared mutable state to corrupt, and backtracking over a
+//  composed grammar is automatically correct.
+// ===========================================================================
+
+/// Rule-level ordered choice: used to merge two definitions of the same
+/// non-terminal when composing grammars (A -> p1 / p2).
+inline Rule ruleChoice(Rule a, Rule b) {
+    return [a = std::move(a), b = std::move(b)](State& s, const std::vector<Value>& args) -> PResult {
+        auto cp = s.save();
+        PResult r = a(s, args);
+        if (r.ok) return r;
+        s.restore(cp);
+        r = b(s, args);
+        if (r.ok) return r;
+        s.restore(cp);
+        return PResult::fail();
+    };
+}
+
+/// Grammar composition ⊎ (G-ext, Figure 10). If a non-terminal A is defined
+/// in both grammars, the result has A -> p1 / p2 (ordered choice). Purely
+/// syntactic: no type checking here (that is L-ext's job). A generic, reusable
+/// operator -- the piece v3 lacked.
+inline Grammar composeGrammars(const Grammar& g1, const Grammar& g2) {
+    Grammar result = g1;
+    for (const auto& [name, rule] : g2.rules) {
+        auto it = result.rules.find(name);
+        if (it == result.rules.end()) result.rules[name] = rule;
+        else it->second = ruleChoice(it->second, rule);
+    }
+    for (const auto& [name, sig] : g2.sigs)
+        if (!result.sigs.count(name)) result.sigs[name] = sig;
+    for (const auto& [k, v] : g2.attrs)
+        if (!result.attrs.count(k)) result.attrs[k] = v;
+    return result;
+}
+
+namespace apeg_detail {
+/// Signatures of two definitions of the same non-terminal must agree in
+/// arity, and in the declared type of every position typed on both sides.
+inline void checkSigCompatible(const std::string& name, const RuleSig& a, const RuleSig& b) {
+    if (a.params.size() != b.params.size())
+        throw TypeError("L-ext: '" + name + "' distinta aridad de params (" +
+            std::to_string(a.params.size()) + " vs " + std::to_string(b.params.size()) + ")");
+    if (a.returns.size() != b.returns.size())
+        throw TypeError("L-ext: '" + name + "' distinta aridad de returns (" +
+            std::to_string(a.returns.size()) + " vs " + std::to_string(b.returns.size()) + ")");
+    auto check = [&](const std::vector<Type>& ta, const std::vector<Type>& tb, const char* what) {
+        size_t n = std::min(ta.size(), tb.size());
+        for (size_t i = 0; i < n; ++i) {
+            bool bothTyped = ta[i].kind != TypeKind::Undefined && tb[i].kind != TypeKind::Undefined;
+            if (bothTyped && ta[i] != tb[i])
+                throw TypeError("L-ext: '" + name + "' tipo incompatible en " + what + " #" +
+                    std::to_string(i) + " (" + ta[i].toString() + " vs " + tb[i].toString() + ")");
+        }
+    };
+    check(a.paramTypes, b.paramTypes, "param");
+    check(a.returnTypes, b.returnTypes, "return");
+}
+}  // namespace apeg_detail
+
+/// Typed language extension ⊳ (L-ext, Figure 10): compose the grammars (⊎),
+/// re-check type consistency of every non-terminal present in BOTH, then
+/// extend Γ with the types declared by g2. Throws TypeError on a signature
+/// clash. This is L-ext's distinguishing property over plain G-ext.
+inline std::pair<Grammar, Gamma> extendLanguage(const Grammar& g1, const Gamma& gamma1,
+                                                const Grammar& g2) {
+    Grammar merged = composeGrammars(g1, g2);
+    for (const auto& [name, sig2] : g2.sigs) {
+        auto it = g1.sigs.find(name);
+        if (it != g1.sigs.end()) apeg_detail::checkSigCompatible(name, it->second, sig2);
+    }
+    Gamma gammaPrime = gamma1;
+    for (const auto& [name, sig] : g2.sigs) {
+        for (size_t i = 0; i < sig.params.size() && i < sig.paramTypes.size(); ++i)
+            if (sig.paramTypes[i].kind != TypeKind::Undefined) gammaPrime[sig.params[i]] = sig.paramTypes[i];
+        for (size_t i = 0; i < sig.returns.size() && i < sig.returnTypes.size(); ++i)
+            if (sig.returnTypes[i].kind != TypeKind::Undefined) gammaPrime[sig.returns[i]] = sig.returnTypes[i];
+    }
+    return {std::move(merged), std::move(gammaPrime)};
 }
