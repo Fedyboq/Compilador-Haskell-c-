@@ -14,33 +14,8 @@
 #include <utility>
 #include <algorithm>
 
-/**
- * @file Apeg.h
- * @brief Full Adaptable PEG model, faithful to the course paper
- *        (Reis, Bigonha, Di Iorio & Amorim -- Adaptable Parsing Expression
- *        Grammars).
- *
- * This is the layer that was missing in the original MVP.  The MVP had a
- * *recognizer* (`Rule = function<bool(ParserState&)>`): it could only say
- * "matched / did not match".  An APEG is a *language*:
- *
- *   1. Values are first-class (see Value.h) -- including grammars themselves.
- *   2. The grammar is carried inside the parsing state and can be *updated*
- *      while parsing (the "adaptable" part).
- *   3. Non-terminals behave like functions: they receive inherited attributes
- *      (arguments) and produce a synthesized attribute (typically an AST).
- *   4. Three formal operators bridge parsing and semantics:
- *        - Bind        : assign an attribute.
- *        - Constraint  : a semantic predicate (succeeds iff a condition holds).
- *        - Update      : produce a new grammar from the current one.
- */
-
 struct State;
 
-/**
- * @brief Result of running a parsing expression: success flag plus the
- *        synthesized attribute (the value/AST produced on success).
- */
 struct PResult {
     bool  ok = false;
     Value val;
@@ -49,26 +24,16 @@ struct PResult {
     static PResult good(Value v = Value::Unit()) { return PResult{true, std::move(v)}; }
 };
 
-/// A non-terminal rule: receives inherited attributes, yields a PResult.
 using Rule  = std::function<PResult(State&, const std::vector<Value>&)>;
-/// A parsing expression: consumes input, yields a PResult.
+
 using PExpr = std::function<PResult(State&)>;
-/// An attribute expression: a pure computation over the current state's attributes.
+
 using AExpr = std::function<Value(State&)>;
 
-/// Thrown when composing/extending grammars produces incompatible rule
-/// signatures (the L-ext type-consistency check of Figure 10 fails).
 struct TypeError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-/**
- * @brief Declared signature of a non-terminal: its inherited attributes
- *        (params) and synthesized attributes (returns), with optional types.
- *        Models the paper's rule head  ⟨A ϑ::τⁿ  e::τᵐ⟩.  Signatures are
- *        optional metadata: rules that don't need type checking leave them
- *        empty. They are consulted by extendLanguage (L-ext).
- */
 struct RuleSig {
     std::vector<std::string> params;
     std::vector<std::string> returns;
@@ -76,29 +41,15 @@ struct RuleSig {
     std::vector<Type>        returnTypes;
 };
 
-/**
- * @brief A Grammar is a map from non-terminal name to Rule -- and it is a
- *        first-class Value (see Value::Gram).  Updates are *immutable*: they
- *        return a fresh Grammar, which is what makes semantic backtracking of
- *        grammar changes possible.
- */
 struct Grammar {
     std::map<std::string, Rule> rules;
 
-    /// Grammar-level attributes: state that belongs to the grammar itself and
-    /// therefore *threads* through the parse (persists on success, rolls back
-    /// on backtracking, exactly like the grammar rules).  This is where truly
-    /// global information lives -- e.g. the set of declared identifiers -- as
-    /// opposed to the per-call local attributes kept in State::env.
     std::map<std::string, Value> attrs;
 
-    /// Optional per-rule signatures (params/returns + types) used by the
-    /// L-ext type-consistency check. Empty for rules that don't need types.
     std::map<std::string, RuleSig> sigs;
 
     bool has(const std::string& name) const { return rules.count(name) > 0; }
 
-    /// Return a copy of this grammar with `name` bound to `rule` (add or replace).
     Grammar with(const std::string& name, Rule rule) const {
         Grammar g = *this;
         g.rules[name] = std::move(rule);
@@ -106,35 +57,22 @@ struct Grammar {
     }
 };
 
-/// Typing context Γ : ϑ → τ (a snapshot of which attribute variables a given
-/// language has typed). Flat map, packaged inside a LanguageValue.
 using Gamma = std::map<std::string, Type>;
 
-/**
- * @brief A language value: "a type-checked grammar together with its typing
- *        context" (tLang in the paper). Unlike a raw Grammar (pure syntax,
- *        no guarantees), a LanguageValue has passed the L-ext consistency
- *        check at least once. It is a first-class Value (Value::Lang).
- */
 struct LanguageValue {
     Grammar grammar;
     Gamma   gamma;
 };
 
-/**
- * @brief The parsing state, extended from the MVP to carry the grammar as a
- *        value and an environment of attribute bindings.
- */
 struct State {
     std::string_view input;
     size_t cursor = 0;
-    std::shared_ptr<Grammar> grammar;       ///< current grammar (adaptable, first-class)
-    std::map<std::string, Value> env;       ///< attribute environment
+    std::shared_ptr<Grammar> grammar;
+    std::map<std::string, Value> env;
 
     bool has_more() const { return cursor < input.size(); }
     char peek() const     { return has_more() ? input[cursor] : '\0'; }
 
-    /// Snapshot of cursor + grammar + attributes, for full semantic backtracking.
     struct Checkpoint {
         size_t cursor;
         std::shared_ptr<Grammar> grammar;
@@ -144,16 +82,10 @@ struct State {
     void restore(const Checkpoint& c) { cursor = c.cursor; grammar = c.grammar; env = c.env; }
 };
 
-// ===========================================================================
-//  Attribute expressions (pure computations over attributes)
-// ===========================================================================
-
-/// A literal attribute value.
 inline AExpr AVal(Value v) {
     return [v = std::move(v)](State&) { return v; };
 }
 
-/// Read an attribute from the environment (Unit if unbound).
 inline AExpr AVar(std::string name) {
     return [name = std::move(name)](State& s) -> Value {
         auto it = s.env.find(name);
@@ -161,17 +93,10 @@ inline AExpr AVar(std::string name) {
     };
 }
 
-// ===========================================================================
-//  Core PEG combinators (now attribute-aware: they synthesize Values)
-// ===========================================================================
-
-/// Always succeeds, consuming nothing.
 inline PExpr Empty() { return [](State&) { return PResult::good(); }; }
 
-/// Always fails.
 inline PExpr Fail() { return [](State&) { return PResult::fail(); }; }
 
-/// Match a single character literal.
 inline PExpr Lit(char c) {
     return [c](State& s) -> PResult {
         if (s.has_more() && s.peek() == c) { s.cursor++; return PResult::good(Value::Str(std::string(1, c))); }
@@ -179,7 +104,6 @@ inline PExpr Lit(char c) {
     };
 }
 
-/// Match an exact string of characters.
 inline PExpr Text(std::string w) {
     return [w = std::move(w)](State& s) -> PResult {
         if (s.cursor + w.size() <= s.input.size() &&
@@ -191,7 +115,6 @@ inline PExpr Text(std::string w) {
     };
 }
 
-/// Match a character in the inclusive range [lo, hi].
 inline PExpr Range(char lo, char hi) {
     return [lo, hi](State& s) -> PResult {
         if (s.has_more() && s.peek() >= lo && s.peek() <= hi) {
@@ -202,7 +125,6 @@ inline PExpr Range(char lo, char hi) {
     };
 }
 
-/// Skip optional whitespace; always succeeds.
 inline PExpr Ws() {
     return [](State& s) -> PResult {
         while (s.has_more()) {
@@ -214,7 +136,6 @@ inline PExpr Ws() {
     };
 }
 
-/// Sequence: run every expression; the synthesized value is the last one's.
 inline PExpr Seq(std::vector<PExpr> es) {
     return [es = std::move(es)](State& s) -> PResult {
         auto cp = s.save();
@@ -228,7 +149,6 @@ inline PExpr Seq(std::vector<PExpr> es) {
     };
 }
 
-/// Ordered choice: try each alternative in order, backtracking between them.
 inline PExpr Choice(std::vector<PExpr> es) {
     return [es = std::move(es)](State& s) -> PResult {
         for (auto& e : es) {
@@ -241,7 +161,6 @@ inline PExpr Choice(std::vector<PExpr> es) {
     };
 }
 
-/// Kleene star (0+). Collects synthesized values into a List. Loop-protected.
 inline PExpr Star(PExpr e) {
     return [e = std::move(e)](State& s) -> PResult {
         std::vector<Value> acc;
@@ -250,14 +169,13 @@ inline PExpr Star(PExpr e) {
             size_t before = s.cursor;
             PResult r = e(s);
             if (!r.ok) { s.restore(cp); break; }
-            if (s.cursor == before) break;         // no progress -> stop (no infinite loop)
+            if (s.cursor == before) break;
             acc.push_back(std::move(r.val));
         }
         return PResult::good(Value::List(std::move(acc)));
     };
 }
 
-/// One or more (1+). Collects synthesized values into a List.
 inline PExpr Plus(PExpr e) {
     return [e = std::move(e)](State& s) -> PResult {
         PResult first = e(s);
@@ -275,7 +193,6 @@ inline PExpr Plus(PExpr e) {
     };
 }
 
-/// Optional (0 or 1). Always succeeds.
 inline PExpr Opt(PExpr e) {
     return [e = std::move(e)](State& s) -> PResult {
         auto cp = s.save();
@@ -286,7 +203,6 @@ inline PExpr Opt(PExpr e) {
     };
 }
 
-/// Negative lookahead (!e): succeeds iff e fails; consumes nothing.
 inline PExpr Not(PExpr e) {
     return [e = std::move(e)](State& s) -> PResult {
         auto cp = s.save();
@@ -296,7 +212,6 @@ inline PExpr Not(PExpr e) {
     };
 }
 
-/// Positive lookahead (&e): succeeds iff e succeeds; consumes nothing.
 inline PExpr And(PExpr e) {
     return [e = std::move(e)](State& s) -> PResult {
         auto cp = s.save();
@@ -306,11 +221,6 @@ inline PExpr And(PExpr e) {
     };
 }
 
-// ===========================================================================
-//  Tokens
-// ===========================================================================
-
-/// Identifier token: [A-Za-z_][A-Za-z0-9_]*  ->  synthesizes a Sym.
 inline PExpr Ident() {
     return [](State& s) -> PResult {
         auto isFirst = [](char c) { return std::isalpha((unsigned char)c) || c == '_'; };
@@ -323,7 +233,6 @@ inline PExpr Ident() {
     };
 }
 
-/// Integer token: [0-9]+  ->  synthesizes an Int.
 inline PExpr Number() {
     return [](State& s) -> PResult {
         if (!s.has_more() || !std::isdigit((unsigned char)s.peek())) return PResult::fail();
@@ -334,7 +243,6 @@ inline PExpr Number() {
     };
 }
 
-/// Match an identifier token equal to a specific word (used for dynamic keywords).
 inline PExpr Word(std::string w) {
     return [w = std::move(w)](State& s) -> PResult {
         auto cp = s.save();
@@ -345,11 +253,6 @@ inline PExpr Word(std::string w) {
     };
 }
 
-// ===========================================================================
-//  APEG-specific operators: attributes, semantics, and adaptation
-// ===========================================================================
-
-/// Run `e`, and on success store its synthesized value into attribute `var`.
 inline PExpr Capture(std::string var, PExpr e) {
     return [var = std::move(var), e = std::move(e)](State& s) -> PResult {
         PResult r = e(s);
@@ -358,14 +261,12 @@ inline PExpr Capture(std::string var, PExpr e) {
     };
 }
 
-/// Semantic action: consumes nothing, sets the synthesized value to f(state).
 inline PExpr Action(AExpr f) {
     return [f = std::move(f)](State& s) -> PResult {
         return PResult::good(f(s));
     };
 }
 
-/// Bind: assign attribute `var` to f(state). Consumes nothing, always succeeds.
 inline PExpr Bind(std::string var, AExpr f) {
     return [var = std::move(var), f = std::move(f)](State& s) -> PResult {
         s.env[var] = f(s);
@@ -373,19 +274,12 @@ inline PExpr Bind(std::string var, AExpr f) {
     };
 }
 
-/// Constraint: a semantic predicate. Succeeds iff pred(state) is truthy.
-///  Consumes no input -- this is how APEG expresses data-dependent parsing
-///  (e.g. "this identifier must have been declared", "no redefinition").
 inline PExpr Constraint(AExpr pred) {
     return [pred = std::move(pred)](State& s) -> PResult {
         return pred(s).truthy() ? PResult::good() : PResult::fail();
     };
 }
 
-/// Update: adapt the grammar in the current state. This is THE adaptable core:
-///  the parser modifies the language it is parsing, mid-parse.  Because the
-///  grammar is a value (a shared_ptr swapped for a fresh one), backtracking
-///  restores it automatically.
 inline PExpr Update(std::function<void(State&)> modify) {
     return [modify = std::move(modify)](State& s) -> PResult {
         modify(s);
@@ -393,11 +287,6 @@ inline PExpr Update(std::function<void(State&)> modify) {
     };
 }
 
-/// Call a non-terminal, passing inherited attributes (evaluated from AExprs).
-///  Each call gets its OWN local attribute scope (State::env): the callee's
-///  local bindings do not leak back to the caller.  Threaded state (the grammar
-///  and its grammar-level attrs, plus the input cursor) is NOT scoped -- it
-///  flows through, which is what makes grammar adaptation persist.
 inline PExpr Call(std::string name, std::vector<AExpr> args = {}) {
     return [name = std::move(name), args = std::move(args)](State& s) -> PResult {
         auto it = s.grammar->rules.find(name);
@@ -406,34 +295,24 @@ inline PExpr Call(std::string name, std::vector<AExpr> args = {}) {
         vals.reserve(args.size());
         for (auto& a : args) vals.push_back(a(s));
 
-        std::map<std::string, Value> savedEnv = s.env;   // open a local scope
+        std::map<std::string, Value> savedEnv = s.env;
         PResult r = it->second(s, vals);
-        s.env = std::move(savedEnv);                     // close it (restore caller's attrs)
+        s.env = std::move(savedEnv);
         return r;
     };
 }
 
-// ===========================================================================
-//  Helpers to build grammars and run them
-// ===========================================================================
-
-/// Wrap a parsing expression as a Rule that ignores its inherited attributes.
 inline Rule ruleOf(PExpr e) {
     return [e = std::move(e)](State& s, const std::vector<Value>&) -> PResult { return e(s); };
 }
 
-/// Outcome of running a whole grammar over an input.
 struct ParseOutcome {
     bool ok = false;
     Value ast;
-    size_t pos = 0;              ///< cursor where parsing stopped
-    std::string rest;           ///< remaining unconsumed text (for error display)
+    size_t pos = 0;
+    std::string rest;
 };
 
-/**
- * @brief Run grammar `g` from the `start` non-terminal over `input`.
- *        Requires the input to be fully consumed (modulo trailing whitespace).
- */
 inline ParseOutcome runGrammar(std::shared_ptr<Grammar> g, const std::string& start,
                                std::string_view input) {
     State s;
@@ -441,7 +320,7 @@ inline ParseOutcome runGrammar(std::shared_ptr<Grammar> g, const std::string& st
     s.grammar = std::move(g);
 
     PResult r = Call(start)(s);
-    Ws()(s);   // allow trailing whitespace
+    Ws()(s);
 
     ParseOutcome out;
     out.pos  = s.cursor;
@@ -451,16 +330,6 @@ inline ParseOutcome runGrammar(std::shared_ptr<Grammar> g, const std::string& st
     return out;
 }
 
-// ===========================================================================
-//  Grammar composition (⊎) and typed language extension (⊳ / L-ext)
-//  Ported and adapted onto this engine from branch `si` (v1). Because our
-//  grammar updates are immutable, ⊎ is a pure function returning a NEW grammar
-//  -- there is no shared mutable state to corrupt, and backtracking over a
-//  composed grammar is automatically correct.
-// ===========================================================================
-
-/// Rule-level ordered choice: used to merge two definitions of the same
-/// non-terminal when composing grammars (A -> p1 / p2).
 inline Rule ruleChoice(Rule a, Rule b) {
     return [a = std::move(a), b = std::move(b)](State& s, const std::vector<Value>& args) -> PResult {
         auto cp = s.save();
@@ -474,10 +343,6 @@ inline Rule ruleChoice(Rule a, Rule b) {
     };
 }
 
-/// Grammar composition ⊎ (G-ext, Figure 10). If a non-terminal A is defined
-/// in both grammars, the result has A -> p1 / p2 (ordered choice). Purely
-/// syntactic: no type checking here (that is L-ext's job). A generic, reusable
-/// operator -- the piece v3 lacked.
 inline Grammar composeGrammars(const Grammar& g1, const Grammar& g2) {
     Grammar result = g1;
     for (const auto& [name, rule] : g2.rules) {
@@ -493,8 +358,7 @@ inline Grammar composeGrammars(const Grammar& g1, const Grammar& g2) {
 }
 
 namespace apeg_detail {
-/// Signatures of two definitions of the same non-terminal must agree in
-/// arity, and in the declared type of every position typed on both sides.
+
 inline void checkSigCompatible(const std::string& name, const RuleSig& a, const RuleSig& b) {
     if (a.params.size() != b.params.size())
         throw TypeError("L-ext: '" + name + "' distinta aridad de params (" +
@@ -514,12 +378,8 @@ inline void checkSigCompatible(const std::string& name, const RuleSig& a, const 
     check(a.paramTypes, b.paramTypes, "param");
     check(a.returnTypes, b.returnTypes, "return");
 }
-}  // namespace apeg_detail
+}
 
-/// Typed language extension ⊳ (L-ext, Figure 10): compose the grammars (⊎),
-/// re-check type consistency of every non-terminal present in BOTH, then
-/// extend Γ with the types declared by g2. Throws TypeError on a signature
-/// clash. This is L-ext's distinguishing property over plain G-ext.
 inline std::pair<Grammar, Gamma> extendLanguage(const Grammar& g1, const Gamma& gamma1,
                                                 const Grammar& g2) {
     Grammar merged = composeGrammars(g1, g2);

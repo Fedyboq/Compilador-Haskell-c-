@@ -5,44 +5,30 @@
 #include <memory>
 #include <sstream>
 
-// Forward declaration: a Grammar is itself a first-class Value in APEG.
 struct Grammar;
-// A LanguageValue = a type-checked Grammar together with its typing context Γ
-// (see Apeg.h). It is also a first-class Value (kind Lang / tLang in the paper).
+
 struct LanguageValue;
 
-/**
- * @brief A generic, first-class Value in the APEG language.
- *
- * This is the piece that turns the recognizer (a parser that only answers
- * "matched / did not match") into a full language following the paper's model.
- * In an APEG, attributes carry values, and those values can be integers,
- * strings, symbols, lists, AST nodes -- and even *grammars themselves*.
- * Because a Grammar can live inside a Value, grammars become first-class
- * citizens that can be stored, passed as attributes and composed dynamically.
- */
 struct Value {
     enum class Kind {
-        Unit,   ///< The empty/no-result value.
-        Int,    ///< A machine integer.
-        Bool,   ///< A boolean.
-        Str,    ///< A text string (a literal piece of source, etc.).
-        Sym,    ///< A symbol/identifier (semantically distinct from Str).
-        List,   ///< An ordered list of Values.
-        Node,   ///< An AST node: a labelled Value with children.
-        Gram,   ///< A grammar, treated as a value (first-class grammar).
-        Lang    ///< A language: a type-checked grammar + its typing context Γ.
+        Unit,
+        Int,
+        Bool,
+        Str,
+        Sym,
+        List,
+        Node,
+        Gram,
+        Lang
     };
 
     Kind kind = Kind::Unit;
-    long i = 0;                          ///< Int payload.
-    bool b = false;                      ///< Bool payload.
-    std::string s;                       ///< Str / Sym payload, or Node label.
-    std::vector<Value> items;            ///< List elements or Node children.
-    std::shared_ptr<Grammar> gram;       ///< Gram payload (grammar as a value).
-    std::shared_ptr<LanguageValue> lang; ///< Lang payload (grammar + Γ as a value).
-
-    // --- Factory helpers (clearer than aggregate initialisation) ---
+    long i = 0;
+    bool b = false;
+    std::string s;
+    std::vector<Value> items;
+    std::shared_ptr<Grammar> gram;
+    std::shared_ptr<LanguageValue> lang;
 
     static Value Unit()                  { return Value{}; }
     static Value Int(long v)             { Value x; x.kind = Kind::Int;  x.i = v; return x; }
@@ -62,8 +48,6 @@ struct Value {
         Value x; x.kind = Kind::Lang; x.lang = std::move(l); return x;
     }
 
-    // --- Inspection ---
-
     bool truthy() const {
         switch (kind) {
             case Kind::Bool: return b;
@@ -73,10 +57,6 @@ struct Value {
         }
     }
 
-    /**
-     * @brief Renders the value (and any AST it contains) as readable text.
-     *        Used by the demos so a video can show the synthesized attributes.
-     */
     std::string toString() const {
         std::ostringstream os;
         switch (kind) {
@@ -106,9 +86,6 @@ struct Value {
         return os.str();
     }
 
-    /**
-     * @brief Pretty-prints an AST node as an indented tree (nice for videos).
-     */
     std::string toTree(int indent = 0) const {
         std::ostringstream os;
         std::string pad(static_cast<size_t>(indent) * 2, ' ');

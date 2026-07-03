@@ -8,33 +8,8 @@
 #include <cctype>
 #include <utility>
 
-/**
- * @file MetaParser.h
- * @brief Concrete syntax for user-defined grammars, read from TEXT.
- *
- * Ported in spirit from branch `Ignacio` (v2), but reimplemented on top of
- * this engine's immutable Grammar. It compiles a textual PEG pattern into one
- * of our `PExpr` parsing expressions, so a user can WRITE a grammar extension
- * as source and have it become a first-class Grammar value:
- *
- *     create loops { stmt -> 'repeat' . num . 'times' . '{' . stmt . '}' ; }
- *
- * Pattern grammar compiled here (identifiers become Call(name), resolved at
- * run time against the current grammar):
- *
- *     pattern := seq ('/' seq)*        (ordered choice)
- *     seq     := prefix ('.' prefix)*  (sequence)
- *     prefix  := '!' term | term       (negative lookahead)
- *     term    := factor '*' | factor   (Kleene star)
- *     factor  := '\'' literal '\'' | '(' pattern ')' | identifier
- *
- * v2's two bugs are gone by construction: our grammars are immutable values
- * (no Checkpoint to forget to restore), and rules are std::function held by
- * value (no dangling Rule& reference).
- */
 namespace meta {
 
-/// A minimal text cursor for the meta level (independent of the parse State).
 struct Scanner {
     std::string_view src;
     size_t pos = 0;
@@ -49,7 +24,6 @@ struct Scanner {
     }
     bool accept(char c) { skipWs(); if (peek() == c) { pos++; return true; } return false; }
 
-    /// Accept a keyword with a word boundary (so "created" != "create").
     bool acceptWord(const std::string& w) {
         skipWs();
         if (pos + w.size() > src.size() || src.substr(pos, w.size()) != std::string_view(w))
@@ -61,7 +35,6 @@ struct Scanner {
         return true;
     }
 
-    /// Read a lowercase identifier ([a-z][a-z0-9]*), or "" if none.
     std::string ident() {
         skipWs();
         std::string n;
@@ -73,25 +46,22 @@ struct Scanner {
     }
 };
 
-/// Wrap a parsing expression so it tolerates leading whitespace.
 inline PExpr Tok(PExpr p) { return Seq({ Ws(), std::move(p) }); }
 
-std::optional<PExpr> compilePattern(Scanner& sc);  // forward (mutual recursion)
+std::optional<PExpr> compilePattern(Scanner& sc);
 
 inline std::optional<PExpr> compileFactor(Scanner& sc) {
     sc.skipWs();
 
-    // 'literal'  -> match the exact text
     if (sc.peek() == '\'') {
         sc.pos++;
         std::string lit;
         while (!sc.eof() && sc.peek() != '\'') { lit += sc.peek(); sc.pos++; }
-        if (sc.eof()) return std::nullopt;   // unterminated literal
-        sc.pos++;                            // closing quote
+        if (sc.eof()) return std::nullopt;
+        sc.pos++;
         return Tok(Text(lit));
     }
 
-    // ( pattern )  -> the inner pattern
     if (sc.peek() == '(') {
         sc.pos++;
         auto inner = compilePattern(sc);
@@ -102,7 +72,6 @@ inline std::optional<PExpr> compileFactor(Scanner& sc) {
         return inner;
     }
 
-    // identifier  -> call a non-terminal (resolved against the live grammar)
     if (std::islower((unsigned char)sc.peek())) {
         std::string name = sc.ident();
         return Tok(Call(name));
@@ -163,11 +132,6 @@ inline std::optional<PExpr> compilePattern(Scanner& sc) {
     return alts.size() == 1 ? alts[0] : Choice(alts);
 }
 
-/**
- * @brief Parse a  create <name> { (ident -> pattern ;)* }  block.
- * @return the grammar's name and the compiled Grammar (rules only), or
- *         nullopt on a syntax error. Does NOT activate it (like newSyn).
- */
 inline std::optional<std::pair<std::string, Grammar>> parseCreate(Scanner& sc) {
     if (!sc.acceptWord("create")) return std::nullopt;
     std::string gname = sc.ident();
@@ -193,11 +157,11 @@ inline std::optional<std::pair<std::string, Grammar>> parseCreate(Scanner& sc) {
         sc.pos++;
 
         Rule r = ruleOf(*pat);
-        if (g.rules.count(rname)) g.rules[rname] = ruleChoice(g.rules[rname], r);  // A -> p1 / p2
+        if (g.rules.count(rname)) g.rules[rname] = ruleChoice(g.rules[rname], r);
         else g.rules[rname] = r;
     }
     if (!sc.accept('}')) return std::nullopt;
     return std::make_pair(std::move(gname), std::move(g));
 }
 
-}  // namespace meta
+}
