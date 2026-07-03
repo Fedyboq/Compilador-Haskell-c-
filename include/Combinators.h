@@ -1,7 +1,12 @@
 #pragma once
-
+#include "Expr.h"
 #include "ParserState.h"
 #include <utility>
+
+// ============================================================================
+// Combinadores originales : literales, secuencia,
+// eleccion, repeticion y predicados de lookahead.
+// ============================================================================
 
 /**
  * @brief Matches a single specific character.
@@ -29,16 +34,14 @@ inline Rule MatchChar(char c) {
  */
 inline Rule Sequence(Rule a, Rule b) {
     return [a = std::move(a), b = std::move(b)](ParserState& state) -> bool {
-        // Save state checkpoint for backtracking
         auto checkpoint = state.save();
-        
+
         if (a(state)) {
             if (b(state)) {
                 return true;
             }
         }
-        
-        // Backtrack: Restore state to undo any partial matches or environment changes
+
         state.restore(checkpoint);
         return false;
     };
@@ -57,13 +60,11 @@ inline Rule Choice(Rule a, Rule b) {
         if (a(state)) {
             return true;
         }
-        // Rollback any modifications before trying the second alternative
         state.restore(checkpoint);
-        
+
         if (b(state)) {
             return true;
         }
-        // Rollback if both failed
         state.restore(checkpoint);
         return false;
     };
@@ -80,14 +81,12 @@ inline Rule Many(Rule a) {
         while (true) {
             auto checkpoint = state.save();
             size_t old_cursor = state.cursor;
-            
+
             if (!a(state)) {
-                // If it fails, restore state to undo this last failed match
                 state.restore(checkpoint);
                 break;
             }
-            
-            // Loop protection: if no input was consumed, stop immediately
+
             if (state.cursor == old_cursor) {
                 break;
             }
@@ -126,4 +125,149 @@ inline Rule NotPredicate(Rule a) {
     };
 }
 
+// ============================================================================
+// Combinadores nuevos: bind, update, constraint,
+// y llamada a no-terminal con atributos heredados/sintetizados.
+// ============================================================================
 
+/**
+ * @brief Bind parsing expression (𝜗 = p), regla Bind/¬Bind .
+ *
+ * Ejecuta p; si tiene exito, asocia la variable 𝜗 al prefijo de input
+ * efectivamente consumido por p (no al resultado de una expresion, a
+ * diferencia de Update). Si p falla, Bind tambien falla y no se modifica
+ * el environment.
+ *
+ * @param var Nombre de la variable de atributo a la que se le asigna el
+ *            texto consumido.
+ * @param p   Regla cuyo prefijo consumido se captura.
+ */
+inline Rule Bind(const std::string& var, Rule p) {
+    return [var, p = std::move(p)](ParserState& state) -> bool {
+        auto checkpoint = state.save();
+        size_t start = state.cursor;
+
+        if (p(state)) {
+            std::string consumed(state.input.substr(start, state.cursor - start));
+            state.setValue(var, Value(consumed));
+            return true;
+        }
+
+        state.restore(checkpoint);
+        return false;
+    };
+}
+
+/**
+ * @brief Update parsing expression (𝜗 ← e), regla Update.
+ *
+ * Evalua la expresion de atributos e en el environment actual y asocia su
+ * resultado a la variable 𝜗. Siempre tiene exito y no consume input; esto
+ * es lo que permite computar/propagar gramaticas nuevas (por ejemplo
+ * "lan" ← v"lan" ⊳ v"r" en la regla newSyn de μSugar).
+ *
+ * @param var Nombre de la variable de atributo a actualizar.
+ * @param e   Expresion cuyo valor se asigna.
+ */
+inline Rule Update(const std::string& var, Expr e) {
+    return [var, e](ParserState& state) -> bool {
+        Value v = Eval(e, state);
+        state.setValue(var, v);
+        return true;
+    };
+}
+
+/**
+ * @brief Constraint parsing expression (?e), reglas True/False (Figura 7).
+ *
+ * Evalua e; si el resultado es el booleano true, tiene exito consumiendo
+ * nada; si es false, falla. Un valor no-booleano es un error (igual que
+ * "Non boolean value at constraint" en la implementacion Haskell).
+ *
+ * @param e Expresion booleana a evaluar.
+ */
+inline Rule Constraint(Expr e) {
+    return [e](ParserState& state) -> bool {
+        Value v = Eval(e, state);
+        if (!v.isBool()) return false;
+        return v.asBool();
+    };
+}
+
+/**
+ * @brief Llamada a no-terminal con atributos heredados y sintetizados
+ * (𝐴 𝑒 𝜗).
+ *
+ * 1. Evalua langExpr en el environment actual: debe producir un Value que
+ *    contenga una Grammar (el "atributo de lenguaje" v1 del paper).
+ * 2. Busca dentro de esa Grammar la RuleDef llamada nonTerminal.
+ * 3. Evalua cada expresion en args usando el environment ACTUAL (antes de
+ *    entrar al scope de la llamada) y las asocia, en orden, a los nombres
+ *    de parametros de la RuleDef, en un scope nuevo.
+ * 4. Ejecuta el cuerpo de la regla en ese scope nuevo.
+ * 5. Si tiene exito, recoge los valores de returns declarados por la
+ *    RuleDef y los asocia, en orden, a resultVars en el scope del
+ *    llamador.
+ * 6. Si falla, se descarta todo (cursor + ambos environments) como
+ *    cualquier otra regla que fracasa.
+ *
+ * @param langExpr    Expresion que produce el Value-Grammar a usar.
+ * @param nonTerminal Nombre de la regla a invocar dentro de esa Grammar.
+ * @param args        Expresiones para los atributos heredados (evaluadas
+ *                    en el environment del llamador).
+ * @param resultVars  Nombres, en el scope del llamador, donde se guardan
+ *                    los atributos sintetizados que devuelve la regla.
+ */
+inline Rule Call(Expr langExpr, std::string nonTerminal, std::vector<Expr> args,
+                  std::vector<std::string> resultVars) {
+    return [langExpr = std::move(langExpr), nonTerminal = std::move(nonTerminal),
+            args = std::move(args),
+            resultVars = std::move(resultVars)](ParserState& state) -> bool {
+        auto checkpoint = state.save();
+
+        Value langVal = Eval(langExpr, state);
+        if (!langVal.isGrammar()) {
+            state.restore(checkpoint);
+            return false;
+        }
+
+        const Grammar& grammar = langVal.asGrammar();
+        auto it = grammar.find(nonTerminal);
+        if (it == grammar.end()) {
+            state.restore(checkpoint);
+            return false;
+        }
+        const RuleDef& def = it->second;
+
+        // Los argumentos se evaluan en el environment del LLAMADOR, antes
+        // de entrar al scope nuevo (asi el callee no ve variables locales
+        // del llamador que no sean sus parametros explicitos).
+        std::vector<Value> argVals;
+        argVals.reserve(args.size());
+        for (auto& a : args) argVals.push_back(Eval(a, state));
+
+        state.pushValueScope();
+        for (size_t i = 0; i < def.params.size() && i < argVals.size(); ++i) {
+            state.setValue(def.params[i], argVals[i]);
+        }
+
+        bool ok = def.body(state);
+
+        std::vector<Value> results;
+        if (ok) {
+            results.reserve(def.returns.size());
+            for (auto& r : def.returns) results.push_back(state.getValue(r));
+        }
+        state.popValueScope();
+
+        if (!ok) {
+            state.restore(checkpoint);
+            return false;
+        }
+
+        for (size_t i = 0; i < resultVars.size() && i < results.size(); ++i) {
+            state.setValue(resultVars[i], results[i]);
+        }
+        return true;
+    };
+}

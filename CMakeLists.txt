@@ -5,15 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Include directories
 include_directories(include)
 
-# Executable target
 add_executable(apeg_parser_mvp
     src/main.cpp
+    include/Grammar.cpp
+    include/Expr.cpp
 )
 
-# Output directories (convenience for running tests)
 set_target_properties(apeg_parser_mvp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
