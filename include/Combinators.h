@@ -19,6 +19,37 @@ inline Rule MatchChar(char c) {
     };
 }
 
+inline Rule MatchString(std::string_view str) {
+    return [str](ParserState& state) -> bool {
+        auto cp = state.save();
+        for (char c : str) {
+            if (state.has_more() && state.peek() == c) {
+                state.advance();
+            } else {
+                state.restore(cp);
+                return false;
+            }
+        }
+        return true;
+    };
+}
+
+inline Rule MatchRange(char min, char max) {
+    return [min, max](ParserState& state) -> bool {
+        if (state.has_more() && state.peek() >= min && state.peek() <= max) {
+            state.advance();
+            return true;
+        }
+        return false;
+    };
+}
+
+inline Rule Ref(Rule& rule) {
+    return [&rule](ParserState& state) -> bool {
+        return rule(state);
+    };
+}
+
 /**
  * @brief Sequential composition combinator (A followed by B).
  * @param a The first rule to execute.
@@ -126,4 +157,18 @@ inline Rule NotPredicate(Rule a) {
     };
 }
 
+inline Rule OneOrMore(Rule a) {
+    return Sequence(a, Many(a));
+}
 
+template<typename... Rules>
+Rule ChoiceMany(Rule first, Rules... rest) {
+    if constexpr (sizeof...(rest) == 0) return first;
+    else return Choice(first, ChoiceMany(rest...));
+}
+
+template<typename... Rules>
+Rule SeqMany(Rule first, Rules... rest) {
+    if constexpr (sizeof...(rest) == 0) return first;
+    else return Sequence(first, SeqMany(rest...));
+}
